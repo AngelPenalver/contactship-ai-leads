@@ -1,16 +1,46 @@
-# ContactShip Mini - Lead Management System
+# ContactShip AI Leads
 
-Sistema de gestión de leads con integración de IA, sincronización automática y procesamiento asíncrono.
+**El problema:** un equipo de ventas recibe contactos nuevos (leads) y quiere, para cada uno, un resumen y la siguiente acción sugerida, generados con IA. Pero una IA puede tardar varios segundos o fallar, y eso no puede hacer lenta ni romper la API que guarda los leads.
 
-## Tabla de Contenidos
+Prueba técnica **aprobada**, hecha con **NestJS, PostgreSQL, BullMQ/Redis y Google Gemini**. Más proyectos en [angel-dev.lat](https://angel-dev.lat).
 
-- [Características](#características)
-- [Tecnologías](#tecnologías)
-- [Instalación](#instalación)
-- [Configuración](#configuración)
-- [Uso](#uso)
-- [API Endpoints](#api-endpoints)
-- [Estructura del Proyecto](#estructura-del-proyecto)
+## Cómo funciona
+
+```
+POST /api/leads ──▶ API (NestJS) ──▶ PostgreSQL     guarda el lead (email único)
+                        │
+                        └──▶ cola BullMQ (Redis)     y responde al instante
+                                   │
+                                   ▼
+                              Worker ──▶ Gemini     pide JSON {summary, next_action}
+                                   │
+                                   └──▶ PostgreSQL  guarda el resumen en el lead
+
+Cron cada 6 h ──▶ Random User API ──▶ crea leads nuevos (salta los emails repetidos)
+GET /api/leads/:id ──▶ caché en Redis (TTL configurable) ──▶ PostgreSQL
+```
+
+## Decisiones técnicas
+
+- **La IA va en una cola, no dentro de la petición.** Crear un lead solo guarda en PostgreSQL y encola un trabajo; la respuesta llega en milisegundos aunque Gemini tarde. Un worker procesa la cola en segundo plano.
+- **La respuesta de la IA se valida.** El prompt pide solo JSON; el worker lo parsea y comprueba que traiga `summary` y `next_action`. Si Gemini falla o devuelve otra cosa, se guarda un resultado por defecto, así que ningún lead se queda sin datos.
+- **Deduplicación por email en dos niveles.** El servicio comprueba si el email ya existe (y responde `409`), y además la columna es `unique` en PostgreSQL, que es la garantía real si llegan dos peticiones a la vez.
+- **Redis para dos cosas:** la cola de BullMQ y la caché de `GET /api/leads/:id`.
+
+## Lo que mejoraría
+
+- **Reintentos antes del resultado por defecto.** Hoy, cualquier error de Gemini cae directo en el resultado por defecto. Mejor: reintentos de BullMQ con espera creciente (`attempts` + `backoff`) para errores temporales, y el resultado por defecto solo al final.
+- **Invalidar la caché al enriquecer el lead.** Si se consulta un lead antes de que el worker termine, la caché guarda la versión sin resumen hasta que expira el TTL. El worker debería borrar la clave `lead:<id>` al guardar.
+- **Convertir el error de email duplicado de PostgreSQL en un `409`.** Si dos peticiones con el mismo email llegan a la vez, la base de datos rechaza la segunda (bien), pero la API responde `500` en lugar de `409`.
+- **Tests unitarios** del worker y del servicio de IA (respuesta válida, JSON inválido, error de la API).
+
+## Arranque rápido
+
+```bash
+cp .env.example .env    # añade tu GEMINI_API_KEY y una API_KEY propia
+docker compose up -d    # API + PostgreSQL + Redis + Adminer
+# API en http://localhost:4321/api (todas las rutas piden el header x-api-key)
+```
 
 ---
 
@@ -49,7 +79,7 @@ Sistema de gestión de leads con integración de IA, sincronización automática
 ```bash
 # 1. Clonar el repositorio
 git clone <repo-url>
-cd prueba-tecnica-contactship
+cd contactship-ai-leads
 
 # 2. Configurar variables de entorno
 cp .env.example .env
